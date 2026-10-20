@@ -30,6 +30,9 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         app.channel_states.clear()
         app.llm.ainvoke.reset_mock()
+        self.bot_user = patch.object(app.bot._connection, 'user', SimpleNamespace(id=42))
+        self.bot_user.start()
+        self.addCleanup(self.bot_user.stop)
         self.commands = patch.object(app.bot, 'process_commands', new=AsyncMock())
         self.commands.start()
         self.addCleanup(self.commands.stop)
@@ -43,13 +46,13 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
                 return SimpleNamespace(content='{"Intent":"finished"}')
             return SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
         app.llm.ainvoke.side_effect = invoke
-        a, b = message(10, 'ALPHA'), message(20, 'BETA')
+        a, b = message(10, 'ALPHA <@42>'), message(20, 'BETA <@42>')
         await asyncio.gather(app.on_message(a), app.on_message(b))
-        self.assertEqual(app.llm.ainvoke.await_count, 4)
+        self.assertEqual(app.llm.ainvoke.await_count, 2)
         a.reply.assert_awaited_once()
         b.reply.assert_awaited_once()
-        self.assertEqual(app.channel_state(1, 10).messages[0]['content'], 'ALPHA')
-        self.assertEqual(app.channel_state(1, 20).messages[0]['content'], 'BETA')
+        self.assertEqual(app.channel_state(1, 10).messages[0]['content'], 'ALPHA <@42>')
+        self.assertEqual(app.channel_state(1, 20).messages[0]['content'], 'BETA <@42>')
 
     async def test_same_channel_serializes_messages_and_indexes(self):
         async def invoke(messages):
@@ -61,14 +64,22 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.channel_state(1, 20).messages, [])
         self.assertEqual(app.channel_state(2, 10).messages, [])
 
-    async def test_mention_still_summarizes_when_intent_is_discussion(self):
-        app.llm.ainvoke.side_effect = [
-            SimpleNamespace(content='{"Intent":"discussion"}'),
-            SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')]
-        m = message(10, '@工具代理')
-        with patch.object(app.bot._connection, 'user', SimpleNamespace(mentioned_in=lambda _: True)):
-            await app.on_message(m)
+    async def test_explicit_mention_summarizes_once(self):
+        app.llm.ainvoke.side_effect = None
+        app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
+        m = message(10, '<@!42> 請統整')
+        await app.on_message(m)
+        app.llm.ainvoke.assert_awaited_once()
         m.reply.assert_awaited_once()
+
+    async def test_ordinary_messages_never_call_ai_or_reply(self):
+        app.llm.ainvoke.side_effect = RuntimeError('must not call AI')
+        for text in ['一般討論', '討論結束，請總結', '@everyone', '<@999> 請統整']:
+            m = message(10, text)
+            await app.on_message(m)
+            m.reply.assert_not_awaited()
+        app.llm.ainvoke.assert_not_awaited()
+        self.assertEqual(len(app.channel_state(1, 10).messages), 4)
 
     async def test_boards_bound_to_creation_channel_and_default_latest(self):
         board_id = '12345678-1234-1234-1234-123456789012'

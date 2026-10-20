@@ -18,7 +18,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from utils.gemini_utils import llm
 from utils.tldraw_client import TldrawClient
 import httpx
-from utils.prompts import get_intent_agent_prompt, get_summary_agent_prompt, get_analysis_agent_prompt
+from utils.prompts import get_summary_agent_prompt, get_analysis_agent_prompt
 
 from dotenv import load_dotenv
 load_dotenv(".env")
@@ -212,77 +212,42 @@ async def _handle_channel_message(message: discord.Message, state: ChannelState)
     }
     messages_history.append(mes)
 
-    # check user intent
-    intent_system_prompt = get_intent_agent_prompt(origin_query=messages_history)
-    intent_response = await llm.ainvoke([SystemMessage(content=intent_system_prompt)])
-    json_intent_response = _safe_parse_json(intent_response.content)
-    intent = json_intent_response.get("Intent", False)
-    logger.info("Channel %s intent: %s", message.channel.id, intent)
-
-    mentioned = bot.user is not None and bot.user.mentioned_in(message)
-    if intent == "discussion" and not mentioned:
-
-        str_message_history = _stringify(messages_history)
-
-        message_frequency = _message_frequency(messages_history)
-        str_message_frequency = _stringify(message_frequency)
-
-        if message_frequency["quiet_user"] != []:
-            summary_system_prompt = get_summary_agent_prompt(message_frequency = str_message_frequency, message_history = str_message_history)            
-            summary_response = await llm.ainvoke([SystemMessage(content=summary_system_prompt)])
-            json_summary_response = _safe_parse_json(summary_response.content)
-
-            participation = json_summary_response.get("Participation", "無法取得參與度評估")
-
-            embed = discord.Embed(
-                title="👥 成員參與狀況分析",
-                description=participation,
-                color=0x5865F2
-            )
-
-            await message.reply(embed=embed)
-
+    # Only an explicit user mention triggers AI; replies and @everyone do not.
+    if bot.user is None or not re.search(rf"<@!?{bot.user.id}>", message.content):
         return
 
-    if mentioned or intent == "finished":
-        """
-        Summary Phase 
-        - @CPSAgent
-        - intent == "finished" --> user has a summary intent
-        """
-            
-        str_message_history = _stringify(messages_history)
+    str_message_history = _stringify(messages_history)
 
-        message_frequency = _message_frequency(messages_history)
-        str_message_frequency = _stringify(message_frequency)
-        logger.info(f"User message frequency: {str_message_frequency}")
-        
-        summary_system_prompt = get_summary_agent_prompt(message_frequency = str_message_frequency, message_history = str_message_history)            
-        summary_response = await llm.ainvoke([SystemMessage(content=summary_system_prompt)])
-        json_summary_response = _safe_parse_json(summary_response.content)
-
-        title = json_summary_response.get("Title", "無法取得標題")
-        summary =json_summary_response.get("Summary", "無法取得內容")
-        participation = json_summary_response.get("Participation", "無法取得參與度評估")
-
-        # discord embed message
-        embed = discord.Embed(
-            title=title,
-            color=0x5865F2
-        )
-        embed.add_field(
-            name="📝 會議摘要",
-            value=summary,
-            inline=False
-        )
-        embed.add_field(
-            name="👥 成員參與狀況分析",
-            value=participation,
-            inline=False
-        )
-
-        await message.reply(embed=embed)
+    message_frequency = _message_frequency(messages_history)
+    str_message_frequency = _stringify(message_frequency)
+    logger.info(f"User message frequency: {str_message_frequency}")
     
+    summary_system_prompt = get_summary_agent_prompt(message_frequency = str_message_frequency, message_history = str_message_history)
+    summary_response = await llm.ainvoke([SystemMessage(content=summary_system_prompt)])
+    json_summary_response = _safe_parse_json(summary_response.content)
+
+    title = json_summary_response.get("Title", "無法取得標題")
+    summary =json_summary_response.get("Summary", "無法取得內容")
+    participation = json_summary_response.get("Participation", "無法取得參與度評估")
+
+    # discord embed message
+    embed = discord.Embed(
+        title=title,
+        color=0x5865F2
+    )
+    embed.add_field(
+        name="📝 會議摘要",
+        value=summary,
+        inline=False
+    )
+    embed.add_field(
+        name="👥 成員參與狀況分析",
+        value=participation,
+        inline=False
+    )
+
+    await message.reply(embed=embed)
+
     await bot.process_commands(message)
 
 # health check

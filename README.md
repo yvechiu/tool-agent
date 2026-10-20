@@ -92,7 +92,7 @@ The project is designed as a research-oriented prototype for exploring AI-suppor
 同頻道的 AI 處理會依序執行，不同頻道可以同時進行。
 
 - `!ping`：在目前頻道確認連線。
-- 提及機器人或由 AI 判定討論結束：只摘要目前頻道自啟動後收集的訊息。
+- 明確 @提及機器人：只摘要目前頻道自啟動後收集的訊息。
 - `/create-board title:...`：建立白板並綁定目前頻道，可建立多張。
 - `/analyze-board`：省略 `board` 時使用本頻道最新白板；也可指定本頻道建立的白板 URL 或 UUID。
   不接受其他頻道建立的白板。預設結果僅操作者可見，`private:False` 則回覆目前頻道。
