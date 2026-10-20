@@ -15,8 +15,7 @@ from discord.ext import commands
 from discord import app_commands
 
 from langchain_core.messages import SystemMessage, HumanMessage
-# from langchain_openai import ChatOpenAI
-from utils.openai_utils import llm
+from utils.gemini_utils import llm
 from utils.tldraw_client import TldrawClient
 import httpx
 from utils.prompts import get_intent_agent_prompt, get_summary_agent_prompt, get_analysis_agent_prompt
@@ -195,7 +194,11 @@ async def on_message(message: discord.Message):
     state = channel_state(message.guild.id, message.channel.id)
     # Serialize only this channel; other experiments can progress concurrently.
     async with state.lock:
-        await _handle_channel_message(message, state)
+        try:
+            await _handle_channel_message(message, state)
+        except (httpx.RequestError, RuntimeError, ValueError) as exc:
+            logger.warning("AI processing failed in channel %s (%s)", message.channel.id, type(exc).__name__)
+            await message.reply("AI 處理失敗，請檢查 GEMINI_API_KEY、模型、配額及網路連線後再試。")
 
 
 async def _handle_channel_message(message: discord.Message, state: ChannelState):

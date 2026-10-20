@@ -6,9 +6,9 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, patch, Mock
 
 # Keep application import independent of API credentials.
-llm_module = ModuleType('utils.openai_utils')
+llm_module = ModuleType('utils.gemini_utils')
 llm_module.llm = SimpleNamespace(ainvoke=AsyncMock())
-with patch.dict(sys.modules, {'utils.openai_utils': llm_module}):
+with patch.dict(sys.modules, {'utils.gemini_utils': llm_module}):
     import app
 
 

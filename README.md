@@ -1,5 +1,7 @@
 
-# Discord CPSAgent 
+# Discord CPSAgent
+
+Windows 本機測試請見 [Windows 設定指南](WINDOWS_SETUP.md)。AI 功能已改為使用 `GEMINI_API_KEY`，不需要 OpenAI key。
 Discord CPSAgent is a collaborative brainstorming and discussion analysis tool developed for CPS (Collaborative Problem Solving) research.
 
 The project integrates Discord, tldraw, and Fly.io to provide an interactive environment where users can collaborate on shared whiteboards, organize ideas using sticky notes, and generate AI-powered discussion summaries.
@@ -103,7 +105,7 @@ Bot 必須具有各頻道的查看、發送、嵌入連結與附加檔案權限�
 目前紀錄與白板綁定存於單一 Bot 程序的記憶體：重啟後清空，舊白板不能再透過此 Bot 分析，
 需要重新建立白板；白板後端重啟也會清空白板內容。請只執行一個 Bot 實例。
 頻道隔離不是白板網站的存取權限：持有白板網址的人仍可開啟及編輯它。
-此改動未切換 Gemini，也不會自動部署或登入 Discord。
+AI 功能使用 Gemini；不會自動部署或登入 Discord。
 
 離線測試（先安裝 `requirements.txt` 相依套件）：
 
