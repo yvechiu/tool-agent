@@ -121,6 +121,37 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
         second.reply.assert_awaited_once()
         self.assertEqual(app.llm.ainvoke.await_count, 2)
 
+    async def test_allowed_bot_requests_only_own_channel_without_being_recorded(self):
+        app.llm.ainvoke.side_effect = None
+        app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
+        app.channel_state(1, 10).messages.append({'user':'human', 'content':'ALPHA'})
+        app.channel_state(1, 20).messages.append({'user':'human', 'content':'BETA'})
+        m = message(10, '<@42> 摘要')
+        m.author = SimpleNamespace(id=1560949145030893618, bot=True)
+        await app.on_message(m)
+        m.reply.assert_awaited_once()
+        prompt = app.llm.ainvoke.call_args.args[0][0].content
+        self.assertIn('ALPHA', prompt)
+        self.assertNotIn('BETA', prompt)
+        self.assertEqual(len(app.channel_state(1, 10).messages), 1)
+        app.bot.process_commands.assert_not_awaited()
+
+    async def test_bots_cannot_trigger_loop_or_record_ordinary_messages(self):
+        for bot_id, text in [(42, '<@42> 摘要'), (999, '<@42> 摘要'), (1560949145030893618, '引導問題'), (1560949145030893618, '!ping')]:
+            m = message(10, text)
+            m.author = SimpleNamespace(id=bot_id, bot=True)
+            await app.on_message(m)
+            m.reply.assert_not_awaited()
+        app.llm.ainvoke.assert_not_awaited()
+        self.assertEqual(app.channel_states, {})
+
+    async def test_allowed_bot_empty_channel_gets_no_history_notice(self):
+        m = message(10, '<@42> 摘要')
+        m.author = SimpleNamespace(id=1560949145030893618, bot=True)
+        await app.on_message(m)
+        m.reply.assert_awaited_once()
+        app.llm.ainvoke.assert_not_awaited()
+
     async def test_boards_bound_to_creation_channel_and_default_latest(self):
         board_id = '12345678-1234-1234-1234-123456789012'
         client = SimpleNamespace(create_board=AsyncMock(return_value={

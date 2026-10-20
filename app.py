@@ -182,6 +182,9 @@ def _summary_requested(content: str, role_mentions=()) -> bool:
     return explicit or plain_name or named_role
 
 
+ALLOWED_SUMMARY_BOT_IDS = {1560949145030893618}
+
+
 @bot.event
 async def on_message(message: discord.Message):
     """
@@ -196,14 +199,15 @@ async def on_message(message: discord.Message):
         _summary_requested(message.content, getattr(message, "role_mentions", ())),
     )
 
-    if message.author.bot:
-        """
-        message.author.bot == True >>> message from chatbot
-        - need to ignore message from chatbot to avoid infinite loop
-        """
+    # Never respond to ourselves, including a summary containing a mention.
+    if bot.user and getattr(message.author, "id", None) == bot.user.id:
         return
-
-    if message.content.startswith("!"):
+    if message.author.bot:
+        if getattr(message.author, "id", None) not in ALLOWED_SUMMARY_BOT_IDS:
+            return
+        if not _summary_requested(message.content, getattr(message, "role_mentions", ())):
+            return
+    elif message.content.startswith("!"):
         await bot.process_commands(message)
         return
 
@@ -230,16 +234,22 @@ async def on_message(message: discord.Message):
 async def _handle_channel_message(message: discord.Message, state: ChannelState):
     messages_history = state.messages
 
-    mes = {
-        "index": len(messages_history),
-        "content": message.content,
-        "timestamp": datetime.now(taiwan_tz).strftime("%Y-%m-%d %H:%M:%S"),
-        "user": str(message.author),
-    }
-    messages_history.append(mes)
+    # Bot requests are control messages, not participant discussion.
+    if not message.author.bot:
+        mes = {
+            "index": len(messages_history),
+            "content": message.content,
+            "timestamp": datetime.now(taiwan_tz).strftime("%Y-%m-%d %H:%M:%S"),
+            "user": str(message.author),
+        }
+        messages_history.append(mes)
 
     # Pasted @工具代理 is supported alongside Discord user mentions.
     if not _summary_requested(message.content, getattr(message, "role_mentions", ())):
+        return
+
+    if not messages_history:
+        await message.reply("本頻道尚無可摘要的參與者對話，請先開始討論。")
         return
 
     str_message_history = _stringify(messages_history)
@@ -277,7 +287,8 @@ async def _handle_channel_message(message: discord.Message, state: ChannelState)
     logger.info("Summary sent: channel=%s author=%s",
                 message.channel.id, getattr(message.author, "id", "unknown"))
 
-    await bot.process_commands(message)
+    if not message.author.bot:
+        await bot.process_commands(message)
 
 # health check
 @bot.command()
