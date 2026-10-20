@@ -367,12 +367,12 @@ async def create_tldraw_board(interaction: discord.Interaction, title: str):
 @bot.tree.command(name="analyze-board", description="Analyze sticky notes from the whiteboard")
 @app_commands.describe(
     board="本頻道建立的白板 URL 或 UUID；留空使用本頻道最新白板",
-    private="Send analysis only to you (default: True)",
+    private="Send analysis only to you (default: False)",
 )
 async def analyze_tldraw_board(
     interaction: discord.Interaction,
     board: str | None = None,
-    private: bool = True,
+    private: bool = False,
 ):
     if interaction.guild_id is None or interaction.channel_id is None:
         await interaction.response.send_message("請在伺服器頻道內使用白板指令。", ephemeral=True)
