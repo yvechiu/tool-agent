@@ -81,6 +81,17 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
         app.llm.ainvoke.assert_not_awaited()
         self.assertEqual(len(app.channel_state(1, 10).messages), 4)
 
+    async def test_different_people_can_both_request_in_same_channel(self):
+        app.llm.ainvoke.side_effect = None
+        app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
+        first = message(10, '<@42> 摘要', user='yuu8753')
+        second = message(10, '<@42> 摘要', user='JinYu')
+        await app.on_message(first)
+        await app.on_message(second)
+        first.reply.assert_awaited_once()
+        second.reply.assert_awaited_once()
+        self.assertEqual(app.llm.ainvoke.await_count, 2)
+
     async def test_boards_bound_to_creation_channel_and_default_latest(self):
         board_id = '12345678-1234-1234-1234-123456789012'
         client = SimpleNamespace(create_board=AsyncMock(return_value={

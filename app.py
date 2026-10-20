@@ -177,6 +177,13 @@ async def on_message(message: discord.Message):
     Monitor Conversation 
     """
 
+    logger.info(
+        "Message received: channel=%s author=%s bot=%s chars=%s explicit_mention=%s",
+        message.channel.id, getattr(message.author, "id", "unknown"),
+        message.author.bot, len(message.content),
+        bool(bot.user and re.search(rf"<@!?{bot.user.id}>", message.content)),
+    )
+
     if message.author.bot:
         """
         message.author.bot == True >>> message from chatbot
@@ -193,9 +200,16 @@ async def on_message(message: discord.Message):
         return
     state = channel_state(message.guild.id, message.channel.id)
     # Serialize only this channel; other experiments can progress concurrently.
+    if state.lock.locked():
+        logger.info("Message queued: channel=%s", message.channel.id)
     async with state.lock:
         try:
             await _handle_channel_message(message, state)
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Discord response failed: channel=%s author=%s status=%s code=%s",
+                message.channel.id, getattr(message.author, "id", "unknown"), exc.status, exc.code,
+            )
         except (httpx.RequestError, RuntimeError, ValueError) as exc:
             logger.warning("AI processing failed in channel %s (%s)", message.channel.id, type(exc).__name__)
             await message.reply("AI 處理失敗，請檢查 GEMINI_API_KEY、模型、配額及網路連線後再試。")
@@ -220,7 +234,8 @@ async def _handle_channel_message(message: discord.Message, state: ChannelState)
 
     message_frequency = _message_frequency(messages_history)
     str_message_frequency = _stringify(message_frequency)
-    logger.info(f"User message frequency: {str_message_frequency}")
+    logger.info("Summary started: channel=%s author=%s messages=%s",
+                message.channel.id, getattr(message.author, "id", "unknown"), len(messages_history))
     
     summary_system_prompt = get_summary_agent_prompt(message_frequency = str_message_frequency, message_history = str_message_history)
     summary_response = await llm.ainvoke([SystemMessage(content=summary_system_prompt)])
@@ -247,6 +262,8 @@ async def _handle_channel_message(message: discord.Message, state: ChannelState)
     )
 
     await message.reply(embed=embed)
+    logger.info("Summary sent: channel=%s author=%s",
+                message.channel.id, getattr(message.author, "id", "unknown"))
 
     await bot.process_commands(message)
 
