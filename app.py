@@ -171,6 +171,13 @@ async def on_ready():
     logger.info(f"✅ Bot 登入成功: {bot.user.name} (ID: {bot.user.id})")
     logger.info("--------------------------------")
 
+def _summary_requested(content: str) -> bool:
+    """Accept a Discord user mention or the pasted display name."""
+    explicit = bool(bot.user and re.search(rf"<@!?{bot.user.id}>", content))
+    plain_name = bool(re.search(r"(?<!\w)@工具代理(?=$|[\s，。！？、:：,!?])", content))
+    return explicit or plain_name
+
+
 @bot.event
 async def on_message(message: discord.Message):
     """
@@ -178,10 +185,11 @@ async def on_message(message: discord.Message):
     """
 
     logger.info(
-        "Message received: channel=%s author=%s bot=%s chars=%s explicit_mention=%s",
+        "Message received: channel=%s author=%s bot=%s chars=%s explicit_mention=%s summary_trigger=%s",
         message.channel.id, getattr(message.author, "id", "unknown"),
         message.author.bot, len(message.content),
         bool(bot.user and re.search(rf"<@!?{bot.user.id}>", message.content)),
+        _summary_requested(message.content),
     )
 
     if message.author.bot:
@@ -226,8 +234,8 @@ async def _handle_channel_message(message: discord.Message, state: ChannelState)
     }
     messages_history.append(mes)
 
-    # Only an explicit user mention triggers AI; replies and @everyone do not.
-    if bot.user is None or not re.search(rf"<@!?{bot.user.id}>", message.content):
+    # Pasted @工具代理 is supported alongside Discord user mentions.
+    if not _summary_requested(message.content):
         return
 
     str_message_history = _stringify(messages_history)

@@ -72,6 +72,21 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
         app.llm.ainvoke.assert_awaited_once()
         m.reply.assert_awaited_once()
 
+    async def test_pasted_name_triggers_for_both_people(self):
+        app.llm.ainvoke.side_effect = None
+        app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
+        for user, text in [('yuu8753', '@工具代理 摘要'), ('JinYu', '@工具代理')]:
+            m = message(10, text, user=user)
+            await app.on_message(m)
+            m.reply.assert_awaited_once()
+        self.assertEqual(app.llm.ainvoke.await_count, 2)
+
+    def test_pasted_name_boundaries(self):
+        for text in ['@工具代理 摘要', '@工具代理', '@工具代理，請統整', '請 @工具代理 摘要']:
+            self.assertTrue(app._summary_requested(text), text)
+        for text in ['@工具代理人 摘要', '工具代理 摘要', '@everyone', '<@999>', '摘要']:
+            self.assertFalse(app._summary_requested(text), text)
+
     async def test_ordinary_messages_never_call_ai_or_reply(self):
         app.llm.ainvoke.side_effect = RuntimeError('must not call AI')
         for text in ['一般討論', '討論結束，請總結', '@everyone', '<@999> 請統整']:

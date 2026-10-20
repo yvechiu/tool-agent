@@ -112,3 +112,5 @@ AI 功能使用 Gemini；不會自動部署或登入 Discord。
 ```sh
 python -m unittest discover -s tests -v
 ```
+
+直接貼上純文字 `@工具代理 摘要` 或 `@工具代理` 也會觸發本頻道摘要，不必從 Discord 選單選取；正式 Discord @提及仍支援。一般聊天不自動呼叫 AI。
