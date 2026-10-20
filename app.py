@@ -171,11 +171,15 @@ async def on_ready():
     logger.info(f"✅ Bot 登入成功: {bot.user.name} (ID: {bot.user.id})")
     logger.info("--------------------------------")
 
-def _summary_requested(content: str) -> bool:
+def _summary_requested(content: str, role_mentions=()) -> bool:
     """Accept a Discord user mention or the pasted display name."""
     explicit = bool(bot.user and re.search(rf"<@!?{bot.user.id}>", content))
     plain_name = bool(re.search(r"(?<!\w)@工具代理(?=$|[\s，。！？、:：,!?])", content))
-    return explicit or plain_name
+    named_role = any(
+        role.name == "工具代理" and f"<@&{role.id}>" in content
+        for role in role_mentions
+    )
+    return explicit or plain_name or named_role
 
 
 @bot.event
@@ -189,7 +193,7 @@ async def on_message(message: discord.Message):
         message.channel.id, getattr(message.author, "id", "unknown"),
         message.author.bot, len(message.content),
         bool(bot.user and re.search(rf"<@!?{bot.user.id}>", message.content)),
-        _summary_requested(message.content),
+        _summary_requested(message.content, getattr(message, "role_mentions", ())),
     )
 
     if message.author.bot:
@@ -235,7 +239,7 @@ async def _handle_channel_message(message: discord.Message, state: ChannelState)
     messages_history.append(mes)
 
     # Pasted @工具代理 is supported alongside Discord user mentions.
-    if not _summary_requested(message.content):
+    if not _summary_requested(message.content, getattr(message, "role_mentions", ())):
         return
 
     str_message_history = _stringify(messages_history)

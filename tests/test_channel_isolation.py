@@ -87,6 +87,20 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
         for text in ['@工具代理人 摘要', '工具代理 摘要', '@everyone', '<@999>', '摘要']:
             self.assertFalse(app._summary_requested(text), text)
 
+    async def test_named_role_mention_triggers_summary(self):
+        app.llm.ainvoke.side_effect = None
+        app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
+        m = message(10, '<@&1234567890123456789> 摘要')
+        m.role_mentions = [SimpleNamespace(id=1234567890123456789, name='工具代理')]
+        await app.on_message(m)
+        m.reply.assert_awaited_once()
+        app.llm.ainvoke.assert_awaited_once()
+
+    def test_other_role_does_not_trigger(self):
+        roles = [SimpleNamespace(id=123, name='其他角色')]
+        self.assertFalse(app._summary_requested('<@&123> 摘要', roles))
+        self.assertFalse(app._summary_requested('<@&456> 摘要', [SimpleNamespace(id=123, name='工具代理')]))
+
     async def test_ordinary_messages_never_call_ai_or_reply(self):
         app.llm.ainvoke.side_effect = RuntimeError('must not call AI')
         for text in ['一般討論', '討論結束，請總結', '@everyone', '<@999> 請統整']:
