@@ -5,14 +5,16 @@ import pytz
 import logging
 import asyncio
 import io
-from typing import Any, List, Dict
+from typing import Any
 from datetime import datetime
-from collections import Counter
 from dataclasses import dataclass, field
 
 import discord
 from discord.ext import commands
 from discord import app_commands
+from aiohttp import web
+from utils.phase_store import PhaseStore
+from utils.phase_api import create_control_app
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from utils.gemini_utils import llm
@@ -36,12 +38,30 @@ version = current_time_taiwan.strftime("v%Y-%m%d-%H%M")
 # discord chatbot setup
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+phase_store: PhaseStore | None = None
+
+
+class ToolAgentBot(commands.Bot):
+    phase_runner = None
+
+    async def close(self):
+        try:
+            if self.phase_runner is not None:
+                await self.phase_runner.cleanup()
+                self.phase_runner = None
+            await super().close()
+        finally:
+            global phase_store
+            if phase_store is not None:
+                phase_store.close()
+                phase_store = None
+
+
+bot = ToolAgentBot(command_prefix="!", intents=intents)
 
 # State is keyed by immutable guild/channel IDs, including thread IDs.
 @dataclass
 class ChannelState:
-    messages: list[dict] = field(default_factory=list)
     boards: list[str] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -62,18 +82,20 @@ def _safe_parse_json(text: str) -> dict:
     if not text or not isinstance(text, str):
         return {}
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
     except json.JSONDecodeError:
         cleaned = re.sub(r"```json|```", "", text).strip()
         m = re.search(r"\{[\s\S]*\}", cleaned)
         if m:
             try:
-                return json.loads(m.group())
+                parsed = json.loads(m.group())
+                return parsed if isinstance(parsed, dict) else {}
             except json.JSONDecodeError as e:
-                print(f"fallback decode error: {e}\nOrigin Content: {text}")
+                logger.warning("Summary JSON could not be decoded")
                 return {}
         else:
-            print(f"無法找到 json object, Origin Content: {text}")
+            logger.warning("Summary response contained no JSON object")
             return {}
 
 def _stringify(obj: Any) -> str:
@@ -82,41 +104,49 @@ def _stringify(obj: Any) -> str:
         return json.dumps(obj, ensure_ascii=False, indent=2)
     return str(obj)
 
-def _message_frequency(messages_history: List[Dict]) -> Dict[str, Any]:
-    """
-    count the frequency of messages sent by each user
-    based on a dynamic threshold: 1 / (N + 1), where N is the total number of unique users.
-    output: {
-        "user name 1": frequency 1,
-        "user name 2": frequency 2,
-        "quiet_user": ["user name"]  which frequency percentage < 0.15
-    }
-    """
-
-    message_frequency = Counter(msg["user"] for msg in messages_history if "user" in msg)
-    num_users = len(message_frequency)
-    result: Dict[str, Any] = dict(message_frequency)
-
-    frequency_threshold = 2 * num_users + 1
-
-    total_frequency = sum(message_frequency.values())
-    if total_frequency > frequency_threshold:
-
-        dynamic_threshold = 1.0 / (num_users + 1)
-
-        quiet_users = [
-            user for user, count in message_frequency.items()
-            if (count / total_frequency) < dynamic_threshold
-        ]
-    else:
-        quiet_users = []
-
-    result["quiet_user"] = quiet_users
-    return result
-    
-
 # =============================================
 # Main Entry Point
+
+async def start_phase_control():
+    global phase_store
+    phase_store = PhaseStore(os.getenv("PHASE_DB_PATH", "data/phases.sqlite3"))
+    token = os.getenv("PHASE_SYNC_TOKEN", "").strip()
+    if not token:
+        logger.warning("Phase API disabled: set PHASE_SYNC_TOKEN to start phase synchronization; summaries need an active phase")
+        return
+
+    async def validate_channel(guild_id, channel_id):
+        if not bot.is_ready():
+            return False
+        channel = bot.get_channel(int(channel_id))
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(int(channel_id))
+            except discord.HTTPException:
+                return False
+        guild = getattr(channel, "guild", None)
+        if guild is None or guild.id != int(guild_id):
+            return False
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return False
+        member = guild.me
+        return bool(member and channel.permissions_for(member).view_channel)
+
+    control = create_control_app(
+        phase_store, token, os.getenv("DISCORD_GUILD_ID", "").strip(),
+        lambda guild, channel: channel_state(guild, channel).lock, validate_channel,
+    )
+    runner = web.AppRunner(control, access_log=None)
+    await runner.setup()
+    try:
+        await web.TCPSite(runner, os.getenv("PHASE_CONTROL_HOST", "127.0.0.1"),
+                          int(os.getenv("PHASE_CONTROL_PORT", "5860"))).start()
+    except Exception:
+        await runner.cleanup()
+        raise
+    bot.phase_runner = runner
+    logger.info("Phase control API started on port %s", os.getenv("PHASE_CONTROL_PORT", "5860"))
+
 
 @bot.event
 async def setup_hook():
@@ -127,6 +157,7 @@ async def setup_hook():
     commands for one server immediately. Without it, commands are registered
     globally and Discord may take a while to refresh its command cache.
     """
+    await start_phase_control()
     try:
         guild_id = os.getenv("DISCORD_GUILD_ID", "").strip()
         # Always sync global commands too. This removes commands that were
@@ -171,15 +202,25 @@ async def on_ready():
     logger.info(f"✅ Bot 登入成功: {bot.user.name} (ID: {bot.user.id})")
     logger.info("--------------------------------")
 
-def _summary_requested(content: str, role_mentions=()) -> bool:
-    """Accept a Discord user mention or the pasted display name."""
-    explicit = bool(bot.user and re.search(rf"<@!?{bot.user.id}>", content))
-    plain_name = bool(re.search(r"(?<!\w)@工具代理(?=$|[\s，。！？、:：,!?])", content))
-    named_role = any(
-        role.name == "工具代理" and f"<@&{role.id}>" in content
-        for role in role_mentions
+def _summary_request_text(content: str, role_mentions=()) -> str | None:
+    """Return instructions after the first supported mention, or None."""
+    content = content.replace("＠", "@")
+    patterns = [r"(?<!\w)@工具代理(?=$|[\s，。！？、:：,!?])"]
+    if bot.user:
+        patterns.append(rf"<@!?{bot.user.id}>")
+    patterns.extend(
+        re.escape(f"<@&{role.id}>")
+        for role in role_mentions if role.name == "工具代理"
     )
-    return explicit or plain_name or named_role
+    matches = [match for pattern in patterns if (match := re.search(pattern, content))]
+    if not matches:
+        return None
+    match = min(matches, key=lambda item: item.start())
+    return content[match.end():].strip().lstrip("，,:：").strip()
+
+
+def _summary_requested(content: str, role_mentions=()) -> bool:
+    return _summary_request_text(content, role_mentions) is not None
 
 
 ALLOWED_SUMMARY_BOT_IDS = {1560949145030893618}
@@ -232,63 +273,59 @@ async def on_message(message: discord.Message):
 
 
 async def _handle_channel_message(message: discord.Message, state: ChannelState):
-    messages_history = state.messages
-
-    # Bot requests are control messages, not participant discussion.
-    if not message.author.bot:
-        mes = {
-            "index": len(messages_history),
-            "content": message.content,
-            "timestamp": datetime.now(taiwan_tz).strftime("%Y-%m-%d %H:%M:%S"),
-            "user": str(message.author),
-        }
-        messages_history.append(mes)
-
-    # Pasted @工具代理 is supported alongside Discord user mentions.
-    if not _summary_requested(message.content, getattr(message, "role_mentions", ())):
+    instructions = _summary_request_text(message.content, getattr(message, "role_mentions", ()))
+    if phase_store is None:
+        if instructions is not None:
+            await message.reply("階段服務尚未就緒，請聯絡實驗主持者。")
+        return
+    if instructions is None:
+        if not message.author.bot:
+            phase_store.record(message.guild.id, message.channel.id, {
+                "content": message.content,
+                "timestamp": message.created_at.isoformat() if hasattr(message, "created_at") else datetime.now(taiwan_tz).isoformat(),
+                "user": str(message.author),
+            }, getattr(message, "id", None))
         return
 
+    # Phase transitions are accepted only through the authenticated backend API.
+    if instructions == "開始階段" or instructions.startswith("開始階段 "):
+        await message.reply("階段只能由 AI引導者的系統切換；聊天訊息不會切換階段。")
+        return
+    phase = phase_store.current(message.guild.id, message.channel.id)
+    if phase is None:
+        await message.reply("尚未開始階段，請實驗主持者先在 AI引導者系統開始本階段。")
+        return
+    messages_history = phase_store.records(message.guild.id, message.channel.id)
     if not messages_history:
-        await message.reply("本頻道尚無可摘要的參與者對話，請先開始討論。")
+        await message.reply("本階段尚無可摘要的參與者對話，請先開始討論。")
         return
 
-    str_message_history = _stringify(messages_history)
-
-    message_frequency = _message_frequency(messages_history)
-    str_message_frequency = _stringify(message_frequency)
+    if instructions in ("", "摘要", "統整", "總結"):
+        instructions = "整理本階段主要觀點、明確共識、不同意見與待釐清事項。"
     logger.info("Summary started: channel=%s author=%s messages=%s",
                 message.channel.id, getattr(message.author, "id", "unknown"), len(messages_history))
-    
-    summary_system_prompt = get_summary_agent_prompt(message_frequency = str_message_frequency, message_history = str_message_history)
-    summary_response = await llm.ainvoke([SystemMessage(content=summary_system_prompt)])
-    json_summary_response = _safe_parse_json(summary_response.content)
-
-    title = json_summary_response.get("Title", "無法取得標題")
-    summary =json_summary_response.get("Summary", "無法取得內容")
-    participation = json_summary_response.get("Participation", "無法取得參與度評估")
-
-    # discord embed message
-    embed = discord.Embed(
-        title=title,
-        color=0x5865F2
-    )
-    embed.add_field(
-        name="📝 會議摘要",
-        value=summary,
-        inline=False
-    )
-    embed.add_field(
-        name="👥 成員參與狀況分析",
-        value=participation,
-        inline=False
-    )
-
-    await message.reply(embed=embed)
+    summary_response = await llm.ainvoke([
+        SystemMessage(content=get_summary_agent_prompt()),
+        HumanMessage(content=json.dumps({
+            "phase": {key: phase[key] for key in ("phase_id", "phase_name", "experiment_id", "sequence")},
+            "request": instructions,
+            "conversation_records": messages_history,
+        }, ensure_ascii=False)),
+    ])
+    result = _safe_parse_json(summary_response.content)
+    title, summary = result.get("Title"), result.get("Summary")
+    if not isinstance(title, str) or not isinstance(summary, str) or not summary.strip():
+        raise ValueError("Invalid summary JSON")
+    # Discord embeds allow 4096 description characters; attach full long reports.
+    embed = discord.Embed(title=(title or "本階段摘要")[:256],
+                          description=summary[:3800], color=0x5865F2)
+    embed.set_footer(text=f"階段：{phase['phase_name']}"[:2048])
+    kwargs = {"embed": embed, "allowed_mentions": discord.AllowedMentions.none()}
+    if len(summary) > 3800:
+        kwargs["file"] = discord.File(io.BytesIO(summary.encode("utf-8")), filename="phase_summary.md")
+    await message.reply(**kwargs)
     logger.info("Summary sent: channel=%s author=%s",
                 message.channel.id, getattr(message.author, "id", "unknown"))
-
-    if not message.author.bot:
-        await bot.process_commands(message)
 
 # health check
 @bot.command()

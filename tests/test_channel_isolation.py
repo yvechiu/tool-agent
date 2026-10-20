@@ -1,9 +1,11 @@
 """Offline Discord handler tests; no real tokens or network calls required."""
 import asyncio
+import json
 import sys
 import unittest
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, patch, Mock
+from utils.phase_store import PhaseStore
 
 # Keep application import independent of API credentials.
 llm_module = ModuleType('utils.gemini_utils')
@@ -29,6 +31,14 @@ def interaction(channel):
 class IsolationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         app.channel_states.clear()
+        self.store = PhaseStore(':memory:')
+        self.addCleanup(self.store.close)
+        store_patch = patch.object(app, 'phase_store', self.store)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
+        for guild, channel in [(1, 10), (1, 20), (2, 10)]:
+            self.store.transition(dict(event_id=f'{guild}-{channel}', experiment_id='exp',
+                guild_id=str(guild), channel_id=str(channel), phase_id='initial', phase_name='初始階段', sequence=1))
         app.llm.ainvoke.reset_mock()
         self.bot_user = patch.object(app.bot._connection, 'user', SimpleNamespace(id=42))
         self.bot_user.start()
@@ -40,19 +50,21 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_summaries_only_see_own_channel(self):
         async def invoke(messages):
             await asyncio.sleep(0)
-            prompt = messages[0].content
+            prompt = messages[-1].content
             self.assertFalse('ALPHA' in prompt and 'BETA' in prompt)
             if 'Intent Detection' in prompt:
                 return SimpleNamespace(content='{"Intent":"finished"}')
             return SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
         app.llm.ainvoke.side_effect = invoke
-        a, b = message(10, 'ALPHA <@42>'), message(20, 'BETA <@42>')
+        await app.on_message(message(10, 'ALPHA'))
+        await app.on_message(message(20, 'BETA'))
+        a, b = message(10, '<@42> 摘要'), message(20, '<@42> 摘要')
         await asyncio.gather(app.on_message(a), app.on_message(b))
         self.assertEqual(app.llm.ainvoke.await_count, 2)
         a.reply.assert_awaited_once()
         b.reply.assert_awaited_once()
-        self.assertEqual(app.channel_state(1, 10).messages[0]['content'], 'ALPHA <@42>')
-        self.assertEqual(app.channel_state(1, 20).messages[0]['content'], 'BETA <@42>')
+        self.assertEqual(self.store.records(1, 10)[0]['content'], 'ALPHA')
+        self.assertEqual(self.store.records(1, 20)[0]['content'], 'BETA')
 
     async def test_same_channel_serializes_messages_and_indexes(self):
         async def invoke(messages):
@@ -60,11 +72,12 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(content='{"Intent":"discussion"}')
         app.llm.ainvoke.side_effect = invoke
         await asyncio.gather(*(app.on_message(message(10, str(i))) for i in range(3)))
-        self.assertEqual([m['index'] for m in app.channel_state(1, 10).messages], [0, 1, 2])
-        self.assertEqual(app.channel_state(1, 20).messages, [])
-        self.assertEqual(app.channel_state(2, 10).messages, [])
+        self.assertEqual([m['content'] for m in self.store.records(1, 10)], ['0', '1', '2'])
+        self.assertEqual(self.store.records(1, 20), [])
+        self.assertEqual(self.store.records(2, 10), [])
 
     async def test_explicit_mention_summarizes_once(self):
+        await app.on_message(message(10, '參與者的討論'))
         app.llm.ainvoke.side_effect = None
         app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
         m = message(10, '<@!42> 請統整')
@@ -73,6 +86,7 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
         m.reply.assert_awaited_once()
 
     async def test_pasted_name_triggers_for_both_people(self):
+        await app.on_message(message(10, '參與者的討論'))
         app.llm.ainvoke.side_effect = None
         app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
         for user, text in [('yuu8753', '@工具代理 摘要'), ('JinYu', '@工具代理')]:
@@ -88,6 +102,7 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app._summary_requested(text), text)
 
     async def test_named_role_mention_triggers_summary(self):
+        await app.on_message(message(10, '參與者的討論'))
         app.llm.ainvoke.side_effect = None
         app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
         m = message(10, '<@&1234567890123456789> 摘要')
@@ -108,9 +123,10 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
             await app.on_message(m)
             m.reply.assert_not_awaited()
         app.llm.ainvoke.assert_not_awaited()
-        self.assertEqual(len(app.channel_state(1, 10).messages), 4)
+        self.assertEqual(len(self.store.records(1, 10)), 4)
 
     async def test_different_people_can_both_request_in_same_channel(self):
+        await app.on_message(message(10, '參與者的討論'))
         app.llm.ainvoke.side_effect = None
         app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
         first = message(10, '<@42> 摘要', user='yuu8753')
@@ -124,16 +140,16 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
     async def test_allowed_bot_requests_only_own_channel_without_being_recorded(self):
         app.llm.ainvoke.side_effect = None
         app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"內容","Participation":"參與"}')
-        app.channel_state(1, 10).messages.append({'user':'human', 'content':'ALPHA'})
-        app.channel_state(1, 20).messages.append({'user':'human', 'content':'BETA'})
+        self.store.record(1, 10, {'user':'human', 'content':'ALPHA'})
+        self.store.record(1, 20, {'user':'human', 'content':'BETA'})
         m = message(10, '<@42> 摘要')
         m.author = SimpleNamespace(id=1560949145030893618, bot=True)
         await app.on_message(m)
         m.reply.assert_awaited_once()
-        prompt = app.llm.ainvoke.call_args.args[0][0].content
+        prompt = app.llm.ainvoke.call_args.args[0][-1].content
         self.assertIn('ALPHA', prompt)
         self.assertNotIn('BETA', prompt)
-        self.assertEqual(len(app.channel_state(1, 10).messages), 1)
+        self.assertEqual(len(self.store.records(1, 10)), 1)
         app.bot.process_commands.assert_not_awaited()
 
     async def test_bots_cannot_trigger_loop_or_record_ordinary_messages(self):
@@ -181,12 +197,59 @@ class IsolationTests(unittest.IsolatedAsyncioTestCase):
             await app.analyze_tldraw_board.callback(interaction(20))
             client.assert_not_called()
 
-    async def test_participation_only_counts_current_channel(self):
-        app.channel_state(1, 20).messages.extend([{'user':'other'}] * 20)
-        state = app.channel_state(1, 10)
-        state.messages.extend([{'user':'active'}] * 6 + [{'user':'quiet'}])
-        result = app._message_frequency(state.messages)
-        self.assertEqual(result, {'active':6, 'quiet':1, 'quiet_user':['quiet']})
+    async def test_stage_request_separation_and_repeat_summary(self):
+        app.llm.ainvoke.side_effect = None
+        app.llm.ainvoke.return_value = SimpleNamespace(content='{"Title":"摘要","Summary":"本階段觀點"}')
+        await app.on_message(message(10, '上一階段內容'))
+        await app.on_message(message(20, '另一頻道內容'))
+        self.store.transition(dict(event_id='next', experiment_id='exp', guild_id='1', channel_id='10', phase_id='converge', phase_name='收斂', sequence=2))
+        await app.on_message(message(10, '新階段的方向與理由'))
+        for instruction in ['請保留分歧', '只整理選擇與理由']:
+            m = message(10, '＠工具代理 ' + instruction)
+            await app.on_message(m)
+            call = app.llm.ainvoke.call_args.args[0]
+            data = json.loads(call[-1].content)
+            self.assertEqual(data['request'], instruction)
+            self.assertEqual(data['phase']['phase_name'], '收斂')
+            self.assertEqual([item['content'] for item in data['conversation_records']], ['新階段的方向與理由'])
+            embed = m.reply.call_args.kwargs['embed']
+            self.assertEqual(embed.description, '本階段觀點')
+            self.assertEqual(embed.fields, [])
+        self.assertEqual(len(self.store.records(1, 10)), 1)
+        self.assertEqual(self.store.current(1, 20)['sequence'], 1)
+
+    async def test_empty_stage_does_not_summarize_old_messages(self):
+        await app.on_message(message(10, '舊的內容'))
+        self.store.transition(dict(event_id='next', experiment_id='exp', guild_id='1', channel_id='10', phase_id='decide', phase_name='決策', sequence=2))
+        m = message(10, '@工具代理 摘要')
+        await app.on_message(m)
+        app.llm.ainvoke.assert_not_awaited()
+        self.assertIn('本階段尚無', m.reply.call_args.args[0])
+
+    async def test_invalid_stage_command_preserves_stage(self):
+        await app.on_message(message(10, '討論內容'))
+        await app.on_message(message(10, '@工具代理 開始階段'))
+        self.assertEqual(self.store.current(1, 10)['sequence'], 1)
+        self.assertEqual(self.store.current(1, 10)['phase_name'], '初始階段')
+
+    async def test_channel_without_phase_never_falls_back_to_whole_channel(self):
+        await app.on_message(message(30, '階段之前的討論'))
+        m = message(30, '@工具代理 摘要')
+        await app.on_message(m)
+        app.llm.ainvoke.assert_not_awaited()
+        self.assertIn('尚未開始階段', m.reply.call_args.args[0])
+        self.assertEqual(self.store.records(1, 30), [])
+
+    async def test_long_summary_attached_without_discord_field_overflow(self):
+        await app.on_message(message(10, '長篇討論'))
+        app.llm.ainvoke.side_effect = None
+        app.llm.ainvoke.return_value = SimpleNamespace(content=json.dumps({'Title':'摘要', 'Summary':'字' * 5000}))
+        m = message(10, '@工具代理 摘要')
+        await app.on_message(m)
+        kwargs = m.reply.call_args.kwargs
+        self.assertLessEqual(len(kwargs['embed'].description), 4096)
+        self.assertIn('file', kwargs)
+        self.assertEqual(kwargs['file'].fp.getvalue().decode(), '字' * 5000)
 
 
 if __name__ == '__main__':
