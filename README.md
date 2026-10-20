@@ -82,3 +82,31 @@ This project aims to explore how AI-assisted tools can support **Collaborative P
 - Supporting AI-assisted reflection and discussion summarization.
 
 The project is designed as a research-oriented prototype for exploring AI-supported collaborative learning and problem-solving environments.
+
+## 頻道獨立運作（tool-agent）
+
+討論紀錄、訊息序號、參與度與摘要依 `(伺服器 ID, 頻道 ID)` 分開處理。
+新建立的頻道與討論串會自動使用獨立紀錄，不依賴名稱或事先登記 ID。
+同頻道的 AI 處理會依序執行，不同頻道可以同時進行。
+
+- `!ping`：在目前頻道確認連線。
+- 提及機器人或由 AI 判定討論結束：只摘要目前頻道自啟動後收集的訊息。
+- `/create-board title:...`：建立白板並綁定目前頻道，可建立多張。
+- `/analyze-board`：省略 `board` 時使用本頻道最新白板；也可指定本頻道建立的白板 URL 或 UUID。
+  不接受其他頻道建立的白板。預設結果僅操作者可見，`private:False` 則回覆目前頻道。
+
+Bot 必須具有各頻道的查看、發送、嵌入連結與附加檔案權限，並在 Developer Portal
+啟用 Message Content Intent。私人新頻道需讓本 Bot 的角色取得權限。
+`DISCORD_GUILD_ID=1499044385793507350` 可用於快速同步該伺服器的指令；此變數不是頻道存取限制。
+其他機器人訊息仍會忽略；私人訊息不納入討論紀錄。
+
+目前紀錄與白板綁定存於單一 Bot 程序的記憶體：重啟後清空，舊白板不能再透過此 Bot 分析，
+需要重新建立白板；白板後端重啟也會清空白板內容。請只執行一個 Bot 實例。
+頻道隔離不是白板網站的存取權限：持有白板網址的人仍可開啟及編輯它。
+此改動未切換 Gemini，也不會自動部署或登入 Discord。
+
+離線測試（先安裝 `requirements.txt` 相依套件）：
+
+```sh
+python -m unittest discover -s tests -v
+```

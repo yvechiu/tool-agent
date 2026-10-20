@@ -8,6 +8,7 @@ import io
 from typing import Any, List, Dict
 from datetime import datetime
 from collections import Counter
+from dataclasses import dataclass, field
 
 import discord
 from discord.ext import commands
@@ -38,11 +39,20 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Message Records
-global frequency, phase
-frequency, phase = 0, 0
+# State is keyed by immutable guild/channel IDs, including thread IDs.
+@dataclass
+class ChannelState:
+    messages: list[dict] = field(default_factory=list)
+    boards: list[str] = field(default_factory=list)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-messages_history = []
+
+channel_states: dict[tuple[int, int], ChannelState] = {}
+
+
+def channel_state(guild_id: int, channel_id: int) -> ChannelState:
+    return channel_states.setdefault((guild_id, channel_id), ChannelState())
+
 
 # =============================================
 # Helper Function
@@ -179,15 +189,24 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    global frequency
+    # Direct messages are outside the experiment workflow.
+    if message.guild is None:
+        return
+    state = channel_state(message.guild.id, message.channel.id)
+    # Serialize only this channel; other experiments can progress concurrently.
+    async with state.lock:
+        await _handle_channel_message(message, state)
+
+
+async def _handle_channel_message(message: discord.Message, state: ChannelState):
+    messages_history = state.messages
 
     mes = {
-        "index": frequency,
+        "index": len(messages_history),
         "content": message.content,
         "timestamp": datetime.now(taiwan_tz).strftime("%Y-%m-%d %H:%M:%S"),
         "user": str(message.author),
     }
-    logger.info(f"收到訊息: \n{mes}")
     messages_history.append(mes)
 
     # check user intent
@@ -195,10 +214,10 @@ async def on_message(message: discord.Message):
     intent_response = await llm.ainvoke([SystemMessage(content=intent_system_prompt)])
     json_intent_response = _safe_parse_json(intent_response.content)
     intent = json_intent_response.get("Intent", False)
-    logger.info(f"Index: {frequency},\n Intent: {intent}")
+    logger.info("Channel %s intent: %s", message.channel.id, intent)
 
-    if intent == "discussion":
-        frequency += 1
+    mentioned = bot.user is not None and bot.user.mentioned_in(message)
+    if intent == "discussion" and not mentioned:
 
         str_message_history = _stringify(messages_history)
 
@@ -222,14 +241,13 @@ async def on_message(message: discord.Message):
 
         return
 
-    if bot.user.mentioned_in(message) or intent == "finished" :
+    if mentioned or intent == "finished":
         """
         Summary Phase 
         - @CPSAgent
         - intent == "finished" --> user has a summary intent
         """
             
-        logger.info(f"Historical messages: {messages_history}")
         str_message_history = _stringify(messages_history)
 
         message_frequency = _message_frequency(messages_history)
@@ -301,6 +319,9 @@ def _tldraw_error_text(error: httpx.HTTPStatusError) -> str:
 @bot.tree.command(name="create-board", description="Create a collaborative whiteboard")
 @app_commands.describe(title="Title of the new whiteboard (1-60 characters)")
 async def create_tldraw_board(interaction: discord.Interaction, title: str):
+    if interaction.guild_id is None or interaction.channel_id is None:
+        await interaction.response.send_message("請在伺服器頻道內使用白板指令。", ephemeral=True)
+        return
     await interaction.response.defer(thinking=True)
     try:
         async with TldrawClient() as client:
@@ -308,6 +329,8 @@ async def create_tldraw_board(interaction: discord.Interaction, title: str):
 
         board_id = TldrawClient.parse_board_id(board["id"])
         board_url = board["url"]
+        state = channel_state(interaction.guild_id, interaction.channel_id)
+        state.boards.append(board_id)
         embed = discord.Embed(
             title="tldraw Whiteboard Created",
             description=f"[Open and edit the whiteboard]({board_url})",
@@ -335,18 +358,28 @@ async def create_tldraw_board(interaction: discord.Interaction, title: str):
 
 @bot.tree.command(name="analyze-board", description="Analyze sticky notes from the whiteboard")
 @app_commands.describe(
-    board="tldraw board URL or board UUID",
+    board="本頻道建立的白板 URL 或 UUID；留空使用本頻道最新白板",
     private="Send analysis only to you (default: True)",
 )
 async def analyze_tldraw_board(
     interaction: discord.Interaction,
-    board: str,
+    board: str | None = None,
     private: bool = True,
 ):
+    if interaction.guild_id is None or interaction.channel_id is None:
+        await interaction.response.send_message("請在伺服器頻道內使用白板指令。", ephemeral=True)
+        return
     await interaction.response.defer(thinking=True, ephemeral=private)
     try:
+        state = channel_state(interaction.guild_id, interaction.channel_id)
+        board_id = TldrawClient.parse_board_id(board) if board else (state.boards[-1] if state.boards else None)
+        if board_id is None or board_id not in state.boards:
+            await interaction.followup.send(
+                "請先在本頻道使用 /create-board 建立白板；只能分析本頻道建立的白板。",
+                ephemeral=True,
+            )
+            return
         async with TldrawClient() as client:
-            board_id = client.parse_board_id(board)
             notes = await client.get_sticky_notes(board_id)
             board_url = client.board_url(board_id)
 
