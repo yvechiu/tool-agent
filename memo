@@ -1,0 +1,23 @@
+
+
+
+
+
+# Fly.io Steps
+>>> 直接在 terminal 執行會比較好
+1. fly auth login
+2. fly apps create discord-cpsagent-bot -> 建立 Fly.io App
+3. fly secrets set -a discord-cpsagent-bot \
+  DISCORD_APPLICATION_TOKEN="你的DC Token" \
+  DISCORD_GUILD_ID="你的DC Guild ID" \
+  OPENAI_API_KEY="你的API_KEY" \
+  TLDRAW_SERVICE_API_KEY="你的API_KEY" \
+  TLDRAW_API_URL=https://discord-whiteboard.fly.dev \
+  TLDRAW_PUBLIC_URL=https://discord-whiteboard.fly.dev
+4. fly deploy -a discord-cpsagent-bot --ha=false
+
+---
+
+# Double Check
+fly status -a discord-cpsagent-bot
+fly logs -a discord-cpsagent-bot

@@ -1,0 +1,21 @@
+# Fly.io app for the Python Discord Gateway bot (not the tldraw whiteboard).
+# Replace app with an available, globally unique Fly app name.
+app = "discord-cpsagent-bot"
+primary_region = "nrt"
+
+[build]
+  dockerfile = "Dockerfile.bot"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+  TLDRAW_API_URL = "https://discord-whiteboard.fly.dev"
+  TLDRAW_PUBLIC_URL = "https://discord-whiteboard.fly.dev"
+  TLDRAW_ANALYSIS_LANGUAGE = "Traditional Chinese"
+
+# No [http_service] or [[services]]: the bot connects OUT to Discord Gateway.
+# No [[mounts]]: ephemeral runtime state, no database volume.
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 1024

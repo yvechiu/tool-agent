@@ -1,0 +1,27 @@
+# fly.toml app configuration file generated for discord-whiteboard on 2026-10-10T22:52:40+08:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'discord-whiteboard'
+primary_region = 'nrt'
+
+[build]
+
+[env]
+  NODE_ENV = 'production'
+  TLDRAW_HOST = '0.0.0.0'
+  TLDRAW_PORT = '5858'
+  TLDRAW_PUBLIC_URL = 'https://discord-whiteboard.fly.dev'
+
+[http_service]
+  internal_port = 5858
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  memory = '1gb'
+  cpus = 1
+  memory_mb = 1024

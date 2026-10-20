@@ -1,0 +1,18 @@
+
+# Fly.io Steps
+>>> 直接在 terminal 執行會比較好
+1. fly auth login
+2. cd whiteboard/ -> 到專案位置
+3. fly launch --no-deploy --ha=false.-> 建立 Fly.io App
+4. fly secrets set TLDRAW_SERVICE_API_KEY="你的API_KEY"
+5. fly deploy --ha=false \
+  --build-arg VITE_TLDRAW_LICENSE_KEY="你的License Key"
+
+---
+
+未來只要修改了以下檔案都要重新跑 step 5：
+- server/src/index.mjs
+- server/src/rooms.mjs
+- src/App.jsx
+- package.json
+- fly.toml
