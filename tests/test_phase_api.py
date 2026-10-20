@@ -1,4 +1,7 @@
 import asyncio
+import os
+import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -97,6 +100,28 @@ class APITests(unittest.IsolatedAsyncioTestCase):
         self.validator.return_value = False
         self.assertEqual((await self.post(event())).status, 503)
         self.assertIsNone(self.store.current(1, 10))
+
+    async def test_local_helper_can_configure_and_start_without_resetting_phase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'scripts').mkdir()
+            script = root / 'scripts' / 'prepare_summary_demo.py'
+            shutil.copyfile(Path(__file__).resolve().parents[1] / 'scripts' / script.name, script)
+            (root / '.env').write_text(f'PHASE_SYNC_TOKEN={self.token}\nDISCORD_GUILD_ID=1\nPHASE_CONTROL_PORT={self.client.server.port}\n')
+            env = {key: value for key, value in os.environ.items() if key not in ('PHASE_SYNC_TOKEN', 'DISCORD_GUILD_ID', 'PHASE_CONTROL_PORT')}
+            async def run(*args):
+                process = await asyncio.create_subprocess_exec(sys.executable, str(script), *args,
+                    env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                stdout, stderr = await process.communicate()
+                self.assertEqual(process.returncode, 0, stderr.decode())
+                self.assertNotIn(self.token, stdout.decode())
+            await run('--configure')
+            await run('--channel-id', '10')
+            before = self.store.current(1, 10)
+            self.store.record(1, 10, {'content':'keep'})
+            await run('--channel-id', '10')
+            self.assertEqual(self.store.current(1, 10), before)
+            self.assertEqual(self.store.records(1, 10), [{'content':'keep'}])
 
     async def test_api_uses_same_channel_lock_but_other_channel_can_progress(self):
         lock = self.lock(1, 10)
